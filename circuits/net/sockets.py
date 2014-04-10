@@ -7,6 +7,8 @@
 This module contains various Socket Components for use with Networking.
 """
 
+from __future__ import absolute_import
+
 import os
 import select
 from collections import defaultdict, deque
