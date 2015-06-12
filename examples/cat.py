@@ -16,7 +16,7 @@ from circuits.io import stdout, File, write
 
 class Cat(File):
 
-    # This adds the already instantiated stdout instnace
+    # This adds the already instantiated stdout instance
     stdout = stdout
 
     def read(self, data):
