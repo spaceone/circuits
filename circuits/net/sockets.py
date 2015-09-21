@@ -39,24 +39,16 @@ from circuits.core import handler, BaseComponent
 from circuits.core.pollers import BasePoller, Poller
 
 from .events import close, closed, connect, connected, disconnect, \
-    disconnected, error, read, ready, write, unreachable
+    disconnected, error, read, ready, write, unreachable, handshake
 
 
 BUFSIZE = 4096  # 4KB Buffer
 BACKLOG = 5000  # 5K Concurrent Connections
 
 
-def do_handshake(sock, on_done=None, on_error=None, extra_args=None):
-    """SSL Async Handshake
-
-    :param on_done: Function called when handshake is complete
-    :type on_done: :function:
-
-    :param on_error: Function called when handshake errored
-    :type on_error: :function:
-    """
-
-    extra_args = extra_args or ()
+@handler('handshake')
+def do_handshake(self, sock, *args):
+    """SSL Async Handshake"""
 
     while True:
         try:
@@ -68,12 +60,11 @@ def do_handshake(sock, on_done=None, on_error=None, extra_args=None):
             elif err.args[0] == SSL_ERROR_WANT_WRITE:
                 select.select([], [sock], [])
             else:
-                callable(on_error) and on_error(sock, err)
+                self.fire(error(sock, err))
+                self.fire(handshake.create('handshake.error', sock, err))
                 return
-
         yield
-
-    callable(on_done) and on_done(sock, *extra_args)
+    self.fire(handshake.create('handshake.success', sock, *args))
 
 
 class Client(BaseComponent):
@@ -238,6 +229,7 @@ class TCPClient(Client):
     socket_family = AF_INET
 
     def init(self, connect_timeout=5, *args, **kwargs):
+        self.addHandler(do_handshake.__get__(self, type(self)))
         self.connect_timeout = connect_timeout
 
     def _create_socket(self):
@@ -292,23 +284,23 @@ class TCPClient(Client):
             self.fire(unreachable(host, port))
             raise StopIteration()
 
-        def on_done(sock):
-            self._poller.addReader(self, sock)
-            self.fire(connected(host, port))
-
         if self.secure:
-            def on_error(sock, err):
-                self.fire(error(sock, err))
-                self._close()
-
             self._sock = ssl_socket(
                 self._sock, self.keyfile, self.certfile, ca_certs=self.ca_certs,
                 do_handshake_on_connect=False
             )
-            for _ in do_handshake(self._sock, on_done, on_error):
-                yield
+            self.fire(handshake(self._sock, host, port))
         else:
-            on_done(self._sock)
+            self._on_connected(self._sock, host, port)
+
+    @handler('handshake.success')
+    def _on_connected(self, sock, host, port):
+        self._poller.addReader(self, sock)
+        self.fire(connected(host, port))
+
+    @handler('handshake.error')
+    def handshake_error(self, sock, err):
+        self._close()
 
 
 class TCP6Client(TCPClient):
@@ -320,6 +312,9 @@ class TCP6Client(TCPClient):
 
 
 class UNIXClient(Client):
+
+    def init(self, *args, **kwargs):
+        self.addHandler(do_handshake.__get__(self, type(self)))
 
     def _create_socket(self):
         from socket import AF_UNIX
@@ -367,20 +362,17 @@ class UNIXClient(Client):
         self._poller.addReader(self, self._sock)
 
         if self.secure:
-            def on_done(sock):
-                self.fire(connected(gethostname(), path))
-
-            def on_error(sock, err):
-                self.fire(error(err))
-
             self._ssock = ssl_socket(
                 self._sock, self.keyfile, self.certfile, ca_certs=self.ca_certs,
                 do_handshake_on_connect=False
             )
-            for _ in do_handshake(self._ssock, on_done, on_error):
-                yield
+            self.fire(handshake(self._ssock, path))
         else:
             self.fire(connected(gethostname(), path))
+
+    @handler('handshake.success')
+    def _on_connected(self, sock, path):
+        self.fire(connected(gethostname(), path))
 
 
 class Server(BaseComponent):
@@ -390,6 +382,7 @@ class Server(BaseComponent):
     def __init__(self, bind, secure=False, backlog=BACKLOG,
                  bufsize=BUFSIZE, channel=channel, **kwargs):
         super(Server, self).__init__(channel=channel)
+        self.addHandler(do_handshake.__get__(self, type(self)))
 
         self._bind = self.parse_bind_parameter(bind)
 
@@ -564,16 +557,6 @@ class Server(BaseComponent):
         # XXX: C901: This has a high McCacbe complexity score of 10.
         # TODO: Refactor this!
 
-        def on_done(sock, host):
-            sock.setblocking(False)
-            self._poller.addReader(self, sock)
-            self._clients.append(sock)
-            self.fire(connect(sock, *host))
-
-        def on_error(sock, err):
-            self.fire(error(sock, err))
-            self._close(sock)
-
         try:
             newsock, host = self._sock.accept()
         except SocketError as e:
@@ -613,11 +596,20 @@ class Server(BaseComponent):
                 ssl_version=self.ssl_version,
                 do_handshake_on_connect=False
             )
-
-            for _ in do_handshake(sslsock, on_done, on_error, extra_args=(host,)):
-                yield
+            self.fire(handshake(sslsock, host))
         else:
-            on_done(newsock, host)
+            self._on_connected(newsock, host)
+
+    @handler('handshake.success')
+    def _on_connected(self, sock, host):
+        sock.setblocking(False)
+        self._poller.addReader(self, sock)
+        self._clients.append(sock)
+        self.fire(connect(sock, *host))
+
+    @handler('handshake.error')
+    def handshake_error(self, sock, err):
+        self._close(sock)
 
     @handler("_disconnect", priority=1)
     def _on_disconnect(self, sock):

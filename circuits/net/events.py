@@ -244,3 +244,17 @@ class closed(Event):
     .. note::
         This event is for Server components.
     """
+
+
+class handshake(Event):
+
+	"""handshake Event
+
+	This Event is send when a socket should make a SSL handshake.
+
+	:param sock: The SSL socket
+	:type sock: ssl.SSLSocket
+	"""
+
+	def __init__(self, sock, *args):
+		super(handshake, self).__init__(sock, *args)
