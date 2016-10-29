@@ -29,7 +29,7 @@ except ImportError:
 from .values import Value
 from ..tools import tryimport
 from .handlers import handler
-from ..six import create_bound_method, next, Iterator
+from ..six import create_bound_method, next, Iterator, string_types
 from .events import exception, generate_events, signal, started, stopped, Event
 
 
@@ -494,9 +494,15 @@ class Manager(object):
             event_object = event
             event_name = event.name
             channels = event.channels or channels
-        else:
+        elif isinstance(event, string_types):
             event_object = None
             event_name = event
+        else:
+            events = event
+            for event in events:
+                for value in self.wait(event, *channels, **kwargs):
+                    yield value
+            return
 
         state = _State(timeout=kwargs.get("timeout", -1))
 
